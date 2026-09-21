@@ -1,6 +1,5 @@
 //! Login state packet handlers.
 
-use rsa::Pkcs1v15Encrypt;
 use sha1::Sha1;
 use sha2::Digest;
 use steel_core::{player::GameProfile, server::DuplicatePlayerWaitError};
@@ -119,34 +118,7 @@ impl JavaTcpClient {
         };
         let challenge = self.challenge.load();
 
-        let Ok(challenge_response) = self
-            .server
-            .key_store
-            .private_key
-            .decrypt(Pkcs1v15Encrypt, &packet.challenge)
-        else {
-            self.kick("Invalid key".into()).await;
-            return ConnectionAction::none();
-        };
-
-        if challenge_response != challenge {
-            self.kick("Invalid challenge response".into()).await;
-            return ConnectionAction::none();
-        }
-
-        let Ok(secret_key) = self
-            .server
-            .key_store
-            .private_key
-            .decrypt(Pkcs1v15Encrypt, &packet.key)
-        else {
-            self.kick("Invalid key".into()).await;
-            return ConnectionAction::none();
-        };
-
-        let secret_key: [u8; 16] = if let Ok(secret_key) = secret_key.try_into() {
-            secret_key
-        } else {
+        let Some(secret_key) = self.decrypt_shared_secret(&packet, challenge) else {
             self.kick("Invalid key".into()).await;
             return ConnectionAction::none();
         };
@@ -212,6 +184,27 @@ impl JavaTcpClient {
         };
 
         self.finish_verified_login(profile, Some(secret_key)).await
+    }
+
+    /// Decrypts the shared secret from a key packet and checks the challenge response.
+    ///
+    /// Every failure returns `None`, and the caller must answer all of them with the
+    /// same disconnect. A client that can tell a PKCS#1 v1.5 padding failure apart
+    /// from a wrong challenge holds the validity oracle a Bleichenbacher attack
+    /// needs, and the server reuses one key for its entire lifetime.
+    fn decrypt_shared_secret(&self, packet: &SKey, challenge: [u8; 4]) -> Option<[u8; 16]> {
+        let key_store = &self.server.key_store;
+        // Both ciphertexts are decrypted up front so that a rejection always costs the
+        // same number of RSA operations. This is not constant time; the rsa crate
+        // itself leaks timing (RUSTSEC-2023-0071, ignored in audit.toml).
+        let challenge_response = key_store.decrypt(&packet.challenge);
+        let secret_key = key_store.decrypt(&packet.key);
+
+        if challenge_response? != challenge {
+            return None;
+        }
+
+        secret_key?.try_into().ok()
     }
 
     /// Negotiates packet compression before the successful login response.
