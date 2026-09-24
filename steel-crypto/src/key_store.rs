@@ -1,6 +1,11 @@
 //! This module contains the `KeyStore` struct, which is used to store the server's encryption keys.
 use rsa::{Pkcs1v15Encrypt, RsaPrivateKey, RsaPublicKey};
 
+/// Returned when decryption fails. Carries no reason so callers can't leak one to clients.
+#[derive(Debug, thiserror::Error)]
+#[error("decryption failed")]
+pub struct DecryptError;
+
 /// A struct that stores the server's encryption keys.
 pub struct KeyStore {
     /// The server's private key.
@@ -26,15 +31,11 @@ impl KeyStore {
         }
     }
 
-    /// Decrypts a PKCS#1 v1.5 ciphertext with the server's private key.
-    ///
-    /// Any failure collapses into `None` so that callers cannot report why a
-    /// decryption failed. Telling a padding failure apart from a successful
-    /// decryption hands a client the validity oracle a Bleichenbacher attack needs,
-    /// and the same key is reused for the lifetime of the server.
-    #[must_use]
-    pub fn decrypt(&self, ciphertext: &[u8]) -> Option<Vec<u8>> {
-        self.private_key.decrypt(Pkcs1v15Encrypt, ciphertext).ok()
+    /// Decrypts a PKCS#1 v1.5 ciphertext. Failures carry no cause on purpose.
+    pub fn decrypt(&self, ciphertext: &[u8]) -> Result<Vec<u8>, DecryptError> {
+        self.private_key
+            .decrypt(Pkcs1v15Encrypt, ciphertext)
+            .map_err(|_| DecryptError)
     }
 
     fn generate_private_key() -> RsaPrivateKey {
@@ -58,11 +59,11 @@ mod tests {
         let ciphertext = public_key
             .encrypt(&mut rand::rng(), Pkcs1v15Encrypt, secret)
             .unwrap();
-        assert_eq!(ks.decrypt(&ciphertext).as_deref(), Some(secret.as_slice()));
+        assert_eq!(ks.decrypt(&ciphertext).unwrap(), secret);
 
         // Malformed and unpadded ciphertexts must be indistinguishable from each other.
-        assert!(ks.decrypt(&[]).is_none());
-        assert!(ks.decrypt(&[0; 128]).is_none());
+        assert!(ks.decrypt(&[]).is_err());
+        assert!(ks.decrypt(&[0; 128]).is_err());
     }
 
     #[test]
